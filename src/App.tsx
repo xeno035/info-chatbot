@@ -6,7 +6,7 @@ import ResumeInfo from './components/ResumeInfo';
 import { supabase } from './lib/supabase';
 import { parseResumeText } from './lib/resumeParser';
 import { parseResumeWithLayoutLM } from './lib/layoutlmParser';
-import { generateResponse } from './lib/chatbot';
+import { answerFromParsed, normalizeParsed } from './lib/chatbot';
 import type { ResumeSession, ChatMessage } from './lib/types';
 
 function App() {
@@ -86,7 +86,11 @@ function App() {
         parsedData = parseResumeText(text);
       }
       
-      const sanitizedData = sanitizeData(parsedData);
+      // Normalize parsed data to ensure consistent structure
+      const normalizedData = normalizeParsed(parsedData);
+      // Store original resume text for RAG (Gemini)
+      normalizedData._raw_text = text;
+      const sanitizedData = sanitizeData(normalizedData);
 
       const title = sanitizedData.contact_information?.name
         ? `${sanitizedData.contact_information.name}'s Resume`
@@ -153,7 +157,9 @@ function App() {
 
       if (userError) throw userError;
 
-      const response = generateResponse(currentSession.parsed_data, sanitizedContent);
+      // Get original resume text from parsed data for RAG
+      const resumeText = currentSession.parsed_data._raw_text || '';
+      const response = await answerFromParsed(currentSession.parsed_data, sanitizedContent, resumeText);
       const sanitizedResponse = sanitizeData(response);
 
       const { error: assistantError } = await supabase

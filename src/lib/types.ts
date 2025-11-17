@@ -7,6 +7,18 @@ export interface ResumeData {
   certifications?: string[];
   languages?: string[];
   contact_information?: ContactInfo;
+  // Raw text content for exact extraction (like Adobe AI)
+  _raw_sections?: {
+    skills?: string;
+    experience?: string;
+    education?: string;
+    projects?: string;
+    certifications?: string;
+    languages?: string;
+    objective?: string;
+  };
+  // Original resume text for RAG (Retrieval Augmented Generation)
+  _raw_text?: string;
 }
 
 export interface ContactInfo {

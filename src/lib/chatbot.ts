@@ -1,220 +1,271 @@
 import type { ResumeData } from './types';
+import { generateGeminiResponse, isGeminiAvailable } from './gemini';
 
-export function generateResponse(resumeData: ResumeData, userQuestion: string): string {
-  const lowerQuestion = userQuestion.toLowerCase();
+/** Exact fallback required by your rules */
+export const FALLBACK = "The resume does not contain this information.";
 
-  if (lowerQuestion.includes('skill') || lowerQuestion.includes('technolog') || lowerQuestion.includes('tech stack')) {
-    return generateSkillsResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('experience') || lowerQuestion.includes('work') || lowerQuestion.includes('job')) {
-    return generateExperienceResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('education') || lowerQuestion.includes('degree') || lowerQuestion.includes('university') || lowerQuestion.includes('college')) {
-    return generateEducationResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('project')) {
-    return generateProjectsResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('certification') || lowerQuestion.includes('certificate')) {
-    return generateCertificationsResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('contact') || lowerQuestion.includes('email') || lowerQuestion.includes('phone')) {
-    return generateContactResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('summar') || lowerQuestion.includes('overview') || lowerQuestion.includes('about')) {
-    return generateSummaryResponse(resumeData);
-  }
-
-  if (lowerQuestion.includes('language')) {
-    return generateLanguagesResponse(resumeData);
-  }
-
-  return generateGeneralResponse(resumeData, userQuestion);
+/** Normalize parsed JSON to safe canonical shape */
+export function normalizeParsed(parsed: any): ResumeData {
+  return {
+    objective_or_summary: parsed.objective_or_summary ?? null,
+    skills_or_tech_stack: Array.isArray(parsed.skills_or_tech_stack) 
+      ? parsed.skills_or_tech_stack 
+      : [],
+    education: Array.isArray(parsed.education) ? parsed.education : [],
+    experience: Array.isArray(parsed.experience) ? parsed.experience : [],
+    projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+    certifications: Array.isArray(parsed.certifications) ? parsed.certifications : [],
+    languages: Array.isArray(parsed.languages) ? parsed.languages : [],
+    contact_information: parsed.contact_information ?? {
+      name: "",
+      email: "",
+      phone: "",
+      location: "",
+    },
+    // Preserve raw sections for exact content extraction (like Adobe AI)
+    _raw_sections: parsed._raw_sections ?? {},
+    // Preserve raw text for RAG (Gemini)
+    _raw_text: parsed._raw_text ?? undefined,
+  };
 }
 
-function generateSkillsResponse(data: ResumeData): string {
-  if (!data.skills_or_tech_stack || data.skills_or_tech_stack.length === 0) {
-    return "The resume does not contain this information.";
-  }
-
-  const skills = data.skills_or_tech_stack;
-  let response = "Based on the resume, here are the technical skills and technologies:\n\n";
-
-  skills.forEach((skill, index) => {
-    response += `• ${skill}\n`;
-  });
-
-  response += `\nTotal: ${skills.length} skills identified.`;
-  return response;
+/** Helper: format a bullet list with highlights */
+function formatList(items: string[]): string | null {
+  if (!items || items.length === 0) return null;
+  return items.map((it) => `- **${it}**`).join("\n");
 }
 
-function generateExperienceResponse(data: ResumeData): string {
-  if (!data.experience || data.experience.length === 0) {
-    return "The resume does not contain this information.";
-  }
+/** Extract skill names consistently */
+function extractSkillNames(skillsRaw: any[]): string[] {
+  if (!Array.isArray(skillsRaw) || skillsRaw.length === 0) return [];
+  return skillsRaw
+    .map((s) => {
+      if (typeof s === "string") return s.trim();
+      if (s && typeof s === "object" && typeof s.name === "string") return s.name.trim();
+      // fallback: stringify
+      return String(s).trim();
+    })
+    .filter(Boolean);
+}
 
-  let response = "Here's a summary of the work experience:\n\n";
+/** Main: answer the user question using Gemini (RAG) or fallback to deterministic parsing */
+export async function answerFromParsed(
+  parsedIn: any, 
+  userQuestionRaw: string,
+  resumeText?: string
+): Promise<string> {
+  const parsed = normalizeParsed(parsedIn);
+  const q = String(userQuestionRaw || "").trim().toLowerCase();
 
-  data.experience.forEach((exp, index) => {
-    response += `${index + 1}. `;
-    if (exp.position) response += `${exp.position}`;
-    if (exp.company) response += ` at ${exp.company}`;
-    response += '\n';
-
-    if (exp.duration) response += `   Duration: ${exp.duration}\n`;
-
-    if (exp.responsibilities && exp.responsibilities.length > 0) {
-      response += '   Key Responsibilities:\n';
-      exp.responsibilities.forEach(resp => {
-        response += `   • ${resp}\n`;
-      });
+  // Try Gemini first if available and resume text is provided
+  if (isGeminiAvailable() && resumeText) {
+    try {
+      const geminiResponse = await generateGeminiResponse(resumeText, parsed, userQuestionRaw);
+      if (geminiResponse) {
+        return geminiResponse;
+      }
+    } catch (error) {
+      console.warn('Gemini response failed, using fallback:', error);
+      // Fall through to deterministic response
     }
-
-    response += '\n';
-  });
-
-  return response.trim();
-}
-
-function generateEducationResponse(data: ResumeData): string {
-  if (!data.education || data.education.length === 0) {
-    return "The resume does not contain this information.";
   }
 
-  let response = "Educational background:\n\n";
-
-  data.education.forEach((edu, index) => {
-    response += `${index + 1}. `;
-    if (edu.degree) response += `${edu.degree}`;
-    if (edu.field) response += ` in ${edu.field}`;
-    response += '\n';
-
-    if (edu.institution) response += `   Institution: ${edu.institution}\n`;
-    if (edu.year) response += `   Year: ${edu.year}\n`;
-    if (edu.details) response += `   ${edu.details}\n`;
-
-    response += '\n';
-  });
-
-  return response.trim();
+  // Fallback to deterministic response based on parsed data
+  return answerFromParsedDeterministic(parsed, q);
 }
 
-function generateProjectsResponse(data: ResumeData): string {
-  if (!data.projects || data.projects.length === 0) {
-    return "The resume does not contain this information.";
-  }
+/** Deterministic answer using only parsed JSON (fallback) */
+function answerFromParsedDeterministic(parsed: ResumeData, q: string): string {
 
-  let response = "Projects listed in the resume:\n\n";
+  // Map simple single-word queries to sections
+  const isSkillQuery = ["skill", "skills", "technical skills", "tech", "tech stack", "technologies", "competencies"].some(
+    (k) => q === k || q.includes(k)
+  );
+  const isExperienceQuery = ["experience", "work", "employment", "jobs", "job", "work history", "career"].some(
+    (k) => q === k || q.includes(k)
+  );
+  const isEducationQuery = ["education", "degree", "college", "university", "qualification", "academic"].some(
+    (k) => q === k || q.includes(k)
+  );
+  const isProjectsQuery = ["projects", "project", "portfolio", "what projects"].some((k) => q === k || q.includes(k));
+  const isCertificationsQuery = ["certifications", "certificate", "licenses", "certification", "credentials"].some(
+    (k) => q === k || q.includes(k)
+  );
+  const isContactQuery = ["contact", "email", "phone", "contact information", "phone number"].some(
+    (k) => q === k || q.includes(k)
+  );
+  const isSummaryQuery = ["summary", "about", "objective", "overview", "profile"].some((k) => q === k || q.includes(k));
+  const isLanguagesQuery = ["languages", "language", "language skills"].some((k) => q === k || q.includes(k));
 
-  data.projects.forEach((project, index) => {
-    response += `${index + 1}. `;
-    if (project.name) response += `${project.name}\n`;
-
-    if (project.description) response += `   ${project.description}\n`;
-
-    if (project.technologies && project.technologies.length > 0) {
-      response += `   Technologies: ${project.technologies.join(', ')}\n`;
+  // Skills - Return exact content like Adobe AI Assistant
+  if (isSkillQuery) {
+    // First, try to get raw content (exact text from document)
+    const rawSkills = parsed._raw_sections?.skills;
+    if (rawSkills && rawSkills.trim().length > 0) {
+      // Return the exact content, preserving formatting
+      return rawSkills.trim();
     }
-
-    response += '\n';
-  });
-
-  return response.trim();
-}
-
-function generateCertificationsResponse(data: ResumeData): string {
-  if (!data.certifications || data.certifications.length === 0) {
-    return "The resume does not contain this information.";
+    
+    // Fallback to structured skills if raw content not available
+    const skills = extractSkillNames(parsed.skills_or_tech_stack || []);
+    if (skills.length === 0) return FALLBACK;
+    const formatted = formatList(skills);
+    return formatted || FALLBACK;
   }
 
-  let response = "Certifications:\n\n";
-
-  data.certifications.forEach((cert, index) => {
-    response += `${index + 1}. ${cert}\n`;
-  });
-
-  return response.trim();
-}
-
-function generateContactResponse(data: ResumeData): string {
-  if (!data.contact_information) {
-    return "The resume does not contain this information.";
-  }
-
-  const contact = data.contact_information;
-  let response = "Contact Information:\n\n";
-
-  if (contact.name) response += `Name: ${contact.name}\n`;
-  if (contact.email) response += `Email: ${contact.email}\n`;
-  if (contact.phone) response += `Phone: ${contact.phone}\n`;
-  if (contact.location) response += `Location: ${contact.location}\n`;
-
-  if (response === "Contact Information:\n\n") {
-    return "The resume does not contain this information.";
-  }
-
-  return response.trim();
-}
-
-function generateSummaryResponse(data: ResumeData): string {
-  if (data.objective_or_summary) {
-    return `Professional Summary:\n\n${data.objective_or_summary}`;
-  }
-
-  let response = "Based on the resume:\n\n";
-  let hasInfo = false;
-
-  if (data.contact_information?.name) {
-    response += `Candidate: ${data.contact_information.name}\n`;
-    hasInfo = true;
-  }
-
-  if (data.skills_or_tech_stack && data.skills_or_tech_stack.length > 0) {
-    response += `\nKey Skills: ${data.skills_or_tech_stack.slice(0, 5).join(', ')}`;
-    if (data.skills_or_tech_stack.length > 5) {
-      response += ` and ${data.skills_or_tech_stack.length - 5} more`;
+  // Experience - Return exact content like Adobe AI Assistant
+  if (isExperienceQuery) {
+    // First, try to get raw content (exact text from document)
+    const rawExperience = parsed._raw_sections?.experience;
+    if (rawExperience && rawExperience.trim().length > 0) {
+      return rawExperience.trim();
     }
-    response += '\n';
-    hasInfo = true;
+    
+    // Fallback to structured experience
+    const ex = parsed.experience || [];
+    if (!Array.isArray(ex) || ex.length === 0) return FALLBACK;
+    const lines = ex.map((e: any) => {
+      // Try to normalize available fields
+      const title = (e.title || e.role || e.position || "").trim();
+      const org = (e.organization || e.company || e.employer || "").trim();
+      const start = e.start_date || e.start_year || e.from || e.duration || "";
+      const end = e.end_date || e.end_year || e.to || "";
+      const dateRange = start || end ? ` — ${start || ""}${start && end ? " to " : ""}${end || ""}` : "";
+      const primary = title ? `**${title}**` : org ? `**${org}**` : "";
+      const orgText = title && org ? `, ${org}` : org ? `**${org}**` : "";
+      const desc = e.description || e.details || "";
+      const responsibilities = e.responsibilities || [];
+      let respText = "";
+      if (Array.isArray(responsibilities) && responsibilities.length > 0) {
+        respText = "\n  " + responsibilities.map((r: string) => `• ${r}`).join("\n  ");
+      }
+      return `- ${primary}${orgText}${dateRange}${desc ? `\n  ${desc}` : ""}${respText}`;
+    });
+    return lines.join("\n");
   }
 
-  if (data.experience && data.experience.length > 0) {
-    response += `\nWork Experience: ${data.experience.length} position(s)\n`;
-    hasInfo = true;
+  // Education - Return exact content like Adobe AI Assistant
+  if (isEducationQuery) {
+    const rawEducation = parsed._raw_sections?.education;
+    if (rawEducation && rawEducation.trim().length > 0) {
+      return rawEducation.trim();
+    }
+    
+    const ed = parsed.education || [];
+    if (!Array.isArray(ed) || ed.length === 0) return FALLBACK;
+    const lines = ed.map((e: any) => {
+      const degree = (e.degree || e.title || "").trim();
+      const inst = (e.institution || e.school || "").trim();
+      const field = (e.field || "").trim();
+      const year = (e.year || e.end_year || "").trim();
+      const years = year ? ` — ${year}` : "";
+      const fieldText = field ? ` in ${field}` : "";
+      if (degree && inst) return `- **${degree}**${fieldText}, ${inst}${years}`;
+      if (degree) return `- **${degree}**${fieldText}${years}`;
+      if (inst) return `- **${inst}**${years}`;
+      if (e.details) return `- ${e.details}${years}`;
+      return `- ${JSON.stringify(e)}`;
+    });
+    return lines.join("\n");
   }
 
-  if (data.education && data.education.length > 0) {
-    response += `Education: ${data.education.length} qualification(s)\n`;
-    hasInfo = true;
+  // Projects - Return exact content like Adobe AI Assistant
+  if (isProjectsQuery) {
+    const rawProjects = parsed._raw_sections?.projects;
+    if (rawProjects && rawProjects.trim().length > 0) {
+      return rawProjects.trim();
+    }
+    
+    const pr = parsed.projects || [];
+    if (!Array.isArray(pr) || pr.length === 0) return FALLBACK;
+    const lines = pr.map((p: any) => {
+      const title = (p.title || p.name || "").trim();
+      const desc = p.description || p.details || "";
+      const techs = p.technologies || [];
+      const techText = Array.isArray(techs) && techs.length > 0 ? ` (${techs.join(", ")})` : "";
+      if (title) return `- **${title}**${desc ? ` — ${desc}` : ""}${techText}`;
+      if (desc) return `- ${desc}${techText}`;
+      return `- ${String(p).slice(0, 180)}`;
+    });
+    return lines.join("\n");
   }
 
-  if (!hasInfo) {
-    return "The resume does not contain this information.";
+  // Certifications - Return exact content like Adobe AI Assistant
+  if (isCertificationsQuery) {
+    const rawCertifications = parsed._raw_sections?.certifications;
+    if (rawCertifications && rawCertifications.trim().length > 0) {
+      return rawCertifications.trim();
+    }
+    
+    const c = parsed.certifications || [];
+    if (!Array.isArray(c) || c.length === 0) return FALLBACK;
+    const lines = c.map((it: any) => {
+      if (typeof it === "string") return `- **${it}**`;
+      if (it && typeof it === "object") {
+        if (it.title) return `- **${it.title}**${it.issued_by ? `, ${it.issued_by}` : ""}`;
+        if (it.name) return `- **${it.name}**`;
+      }
+      return `- **${String(it)}**`;
+    });
+    return lines.join("\n");
   }
 
-  return response.trim();
+  // Contact
+  if (isContactQuery) {
+    const ci = parsed.contact_information || {};
+    const parts: string[] = [];
+    if (ci.name) parts.push(`- **Name:** ${ci.name}`);
+    if (ci.email) parts.push(`- **Email:** ${ci.email}`);
+    if (ci.phone) parts.push(`- **Phone:** ${ci.phone}`);
+    if (ci.location) parts.push(`- **Location:** ${ci.location}`);
+    if (parts.length === 0) return FALLBACK;
+    return parts.join("\n");
+  }
+
+  // Summary / objective - Return exact content like Adobe AI Assistant
+  if (isSummaryQuery) {
+    const rawObjective = parsed._raw_sections?.objective;
+    if (rawObjective && rawObjective.trim().length > 0) {
+      return rawObjective.trim();
+    }
+    
+    const s = parsed.objective_or_summary;
+    let text = "";
+    if (typeof s === "string") {
+      text = s;
+    } else if (s && typeof s === "object" && "text" in s) {
+      text = String((s as any).text || "");
+    }
+    if (!text || String(text).trim() === "") return FALLBACK;
+    return text.trim();
+  }
+
+  // Languages - Return exact content like Adobe AI Assistant
+  if (isLanguagesQuery) {
+    const rawLanguages = parsed._raw_sections?.languages;
+    if (rawLanguages && rawLanguages.trim().length > 0) {
+      return rawLanguages.trim();
+    }
+    
+    const langs = parsed.languages || [];
+    if (!Array.isArray(langs) || langs.length === 0) return FALLBACK;
+    const formatted = formatList(langs.map((l) => (typeof l === "string" ? l : String(l))));
+    return formatted || FALLBACK;
+  }
+
+  // If the query is empty or not recognized, return fallback
+  if (q.length === 0) {
+    return "Please ask a question about the resume. Try: 'skills', 'experience', 'education', 'projects', 'contact', or 'summary'.";
+  }
+
+  return FALLBACK;
 }
 
-function generateLanguagesResponse(data: ResumeData): string {
-  if (!data.languages || data.languages.length === 0) {
-    return "The resume does not contain this information.";
-  }
-
-  let response = "Languages:\n\n";
-
-  data.languages.forEach((lang, index) => {
-    response += `${index + 1}. ${lang}\n`;
-  });
-
-  return response.trim();
-}
-
-function generateGeneralResponse(data: ResumeData, question: string): string {
-  return "I can help you with information from this resume. Try asking about:\n\n• Skills and technologies\n• Work experience\n• Education background\n• Projects\n• Certifications\n• Contact information\n• Professional summary";
+/** Legacy function name for backward compatibility */
+export async function generateResponse(
+  resumeData: ResumeData, 
+  userQuestion: string,
+  resumeText?: string
+): Promise<string> {
+  return answerFromParsed(resumeData, userQuestion, resumeText);
 }
